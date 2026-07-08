@@ -1,10 +1,12 @@
-import type { ServerInstance } from '../app/server.types';
+import type { Context, ServerInstance } from '../app/server.types';
 import { encryptionAlgorithms, serializationFormats } from '@enclosed/lib';
+import { createMiddleware } from 'hono/factory';
 import { isNil } from 'lodash-es';
 import { z } from 'zod';
 import { createUnauthorizedError } from '../app/auth/auth.errors';
 import { protectedRouteMiddleware } from '../app/auth/auth.middleware';
-import { validateJsonBody } from '../shared/validation/validation';
+import { createRateLimiterMiddleware } from '../app/middlewares/rate-limit.middleware';
+import { validateJsonBody, validateParams } from '../shared/validation/validation';
 import { ONE_MONTH_IN_SECONDS, TEN_MINUTES_IN_SECONDS } from './notes.constants';
 import { createCannotCreatePrivateNoteOnPublicInstanceError, createExpirationDelayRequiredError, createNotePayloadTooLargeError } from './notes.errors';
 import { formatNoteForApi } from './notes.models';
@@ -13,44 +15,54 @@ import { getRefreshedNote } from './notes.usecases';
 
 export { registerNotesRoutes };
 
+// ULID shape (Crockford base32, lowercased by generateId). Validating the id at
+// the edge keeps unvalidated input out of the storage-key path instead of
+// relying on storage-driver internals for traversal safety.
+const noteIdParamsSchema = z.object({
+  noteId: z.string().regex(/^[0-9a-hjkmnp-tv-z]{26}$/),
+});
+
 function registerNotesRoutes({ app }: { app: ServerInstance }) {
   setupGetNoteRoute({ app });
   setupGetNoteExistsRoute({ app });
   setupCreateNoteRoute({ app });
 }
 
+// Enforce read access for a note before the handler runs. On public instances
+// everything is readable; on auth-required instances a private note is only
+// readable when authenticated, and "missing" vs "private+unauthenticated" both
+// return the same 401 so note existence can't be probed.
+const noteReadAccessMiddleware = createMiddleware(async (context: Context, next) => {
+  const config = context.get('config');
+
+  if (!config.public.isAuthenticationRequired) {
+    return next();
+  }
+
+  const storage = context.get('storage');
+  const { noteId } = context.req.param();
+  const isAuthenticated = context.get('isAuthenticated');
+
+  const { getNoteById } = createNoteRepository({ storage });
+
+  try {
+    const { note } = await getNoteById({ noteId });
+
+    if (note.isPublic || isAuthenticated) {
+      return next();
+    }
+  } catch (_error) {
+    // Fall through to a uniform 401 (do not distinguish missing from private).
+  }
+
+  throw createUnauthorizedError();
+});
+
 function setupGetNoteRoute({ app }: { app: ServerInstance }) {
   app.get(
     '/api/notes/:noteId',
-    async (context, next) => {
-      const config = context.get('config');
-
-      if (!config.public.isAuthenticationRequired) {
-        return next();
-      }
-
-      const storage = context.get('storage');
-      const { noteId } = context.req.param();
-      const isAuthenticated = context.get('isAuthenticated');
-
-      const { getNoteById } = createNoteRepository({ storage });
-
-      const { note } = await getNoteById({ noteId });
-
-      if (!note) {
-        throw createUnauthorizedError();
-      }
-
-      if (note.isPublic) {
-        return next();
-      }
-
-      if (!isAuthenticated) {
-        throw createUnauthorizedError();
-      }
-
-      return next();
-    },
+    validateParams(noteIdParamsSchema),
+    noteReadAccessMiddleware,
 
     async (context) => {
       const { noteId } = context.req.param();
@@ -70,6 +82,10 @@ function setupGetNoteRoute({ app }: { app: ServerInstance }) {
 function setupGetNoteExistsRoute({ app }: { app: ServerInstance }) {
   app.get(
     '/api/notes/:noteId/exists',
+    createRateLimiterMiddleware({ name: 'note-exists', limit: 60, windowMs: 60 * 1000 }),
+    validateParams(noteIdParamsSchema),
+    noteReadAccessMiddleware,
+
     async (context) => {
       const { noteId } = context.req.param();
       const storage = context.get('storage');
@@ -86,6 +102,7 @@ function setupGetNoteExistsRoute({ app }: { app: ServerInstance }) {
 function setupCreateNoteRoute({ app }: { app: ServerInstance }) {
   app.post(
     '/api/notes',
+    createRateLimiterMiddleware({ name: 'create-note', limit: 60, windowMs: 60 * 1000 }),
     protectedRouteMiddleware,
     validateJsonBody(
       z.object({

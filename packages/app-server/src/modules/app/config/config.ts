@@ -255,11 +255,29 @@ export const configDefinition = {
   },
 } as const satisfies ConfigDefinition;
 
+const INSECURE_DEFAULT_JWT_SECRET = 'change-me';
+const MIN_JWT_SECRET_LENGTH = 32;
+
 export function getConfig({ env }: { env?: Record<string, string | undefined> } = {}) {
   const { config } = defineConfig(
     configDefinition,
     { envSource: env },
   );
+
+  // Fail fast when an operator turns on authentication but leaves the JWT secret
+  // at its public default (or a trivially short value): with a known secret
+  // anyone can forge a valid token and bypass auth entirely. Skipped in tests.
+  if (config.env !== 'test' && config.public.isAuthenticationRequired) {
+    const { jwtSecret } = config.authentication;
+
+    if (jwtSecret === INSECURE_DEFAULT_JWT_SECRET) {
+      throw new Error('Insecure configuration: AUTHENTICATION_JWT_SECRET is still set to the default \'change-me\' while authentication is enabled. Set a strong, random secret (see https://docs.enclosed.cc/self-hosting/configuration).');
+    }
+
+    if (jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
+      throw new Error(`Insecure configuration: AUTHENTICATION_JWT_SECRET must be at least ${MIN_JWT_SECRET_LENGTH} characters when authentication is enabled. Generate one with \`openssl rand -base64 48\`.`);
+    }
+  }
 
   return config;
 }

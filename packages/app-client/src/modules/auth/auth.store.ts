@@ -6,7 +6,9 @@ import { isAccessTokenExpired } from './auth.models';
 export const authStore = createRoot(() => {
   const [getAccessToken, setAccessTokenValue] = makePersisted(createSignal<string | null>(null), { name: 'enclosed_access_token', storage: localStorage });
   const onAuthChangeHook = createHook<{ isAuthenticated: boolean }>();
-  const [getRedirectUrl, setRedirectUrl] = makePersisted(createSignal<string | null>(null), { name: 'enclosed_redirect_url', storage: localStorage });
+  // sessionStorage (not localStorage): the redirect URL can carry the note
+  // decryption key in its fragment, so it must not survive the browser session.
+  const [getRedirectUrl, setRedirectUrl] = makePersisted(createSignal<string | null>(null), { name: 'enclosed_redirect_url', storage: sessionStorage });
 
   const getIsAuthenticated = () => {
     const accessToken = getAccessToken();

@@ -73,7 +73,12 @@ export const LoginPage: Component = () => {
     const { accessToken } = loginResponse;
 
     authStore.setAccessToken({ accessToken });
-    window.location.href = authStore.getRedirectUrl() ?? '/';
+
+    // Consume the redirect URL and clear it immediately: it can contain the note
+    // decryption key in its fragment, which must not linger in storage.
+    const redirectUrl = authStore.getRedirectUrl() ?? '/';
+    authStore.setRedirectUrl(null);
+    window.location.href = redirectUrl;
   };
 
   return (

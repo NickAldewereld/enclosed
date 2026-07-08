@@ -1,9 +1,10 @@
 import type { ServerInstance } from '../server.types';
 import { z } from 'zod';
 import { validateJsonBody } from '../../shared/validation/validation';
+import { createRateLimiterMiddleware } from '../middlewares/rate-limit.middleware';
 import { createUserRepository } from '../users/users.repository';
 import { createUnauthorizedError } from './auth.errors';
-import { arePasswordsMatching, createJwtToken } from './auth.services';
+import { arePasswordsMatching, createJwtToken, DUMMY_PASSWORD_HASH } from './auth.services';
 
 export { registerAuthRoutes };
 
@@ -14,6 +15,7 @@ function registerAuthRoutes({ app }: { app: ServerInstance }) {
 function setupLoginRoute({ app }: { app: ServerInstance }) {
   app.post(
     '/api/auth/login',
+    createRateLimiterMiddleware({ name: 'login', limit: 10, windowMs: 5 * 60 * 1000 }),
     validateJsonBody(z.object({
       email: z.string().email(),
       password: z.string(),
@@ -27,8 +29,9 @@ function setupLoginRoute({ app }: { app: ServerInstance }) {
       const { user } = getUserByEmail({ email });
 
       if (!user) {
-        // This is a security measure to prevent timing attacks and don't leak the existence of the user
-        await arePasswordsMatching({ password, passwordHash: 'dummy' });
+        // Compare against a real bcrypt hash so this path costs the same as a
+        // valid-email path — prevents user enumeration via response timing.
+        await arePasswordsMatching({ password, passwordHash: DUMMY_PASSWORD_HASH });
 
         throw createUnauthorizedError();
       }
